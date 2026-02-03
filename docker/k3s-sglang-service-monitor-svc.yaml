@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sglang-metrics
+  namespace: observability
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      engine: sglang
+  namespaceSelector:
+    matchNames:
+      - sglang
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 5s
+

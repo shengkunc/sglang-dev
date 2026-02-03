@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    deployment.kubernetes.io/revision: "19"
+  name: meta-llama-31-8b-instruct-sglang
+  namespace: sglang
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: meta-llama-31-8b-instruct-sglang
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/restartedAt: "2026-01-28T22:29:55-06:00"
+      labels:
+        app: meta-llama-31-8b-instruct-sglang
+        engine: sglang
+        model: meta-llama-31-8b-instruct
+    spec:
+      containers:
+      - args:
+        - --model-path
+        - meta-llama/Llama-3.1-8B-Instruct
+        - --dtype
+        - bfloat16
+        - --kv-cache-dtype
+        - bf16
+        - --host
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --served-model-name
+        - meta-llama/Llama-3.1-8B-Instruct
+        # Metrics
+        - --enable-metrics
+        # Logging
+        - --log-requests
+        - --log-request-level
+        - "2"
+        - --log-level
+        - info
+        - --log-requests-format
+        - json
+        - --log-requests-target
+        - stdout
+        - --enable-request-time-stats-logging
+        # Tracing
+        - --enable-trace
+        - --otlp-traces-endpoint
+        - otel-collector.observability.svc.cluster.local:4317
+        # Crash dumps
+        - --crash-dump-folder
+        - /var/sglang/crash_dumps
+        command:
+        - python3
+        - -m
+        - sglang.launch_server
+        env:
+        - name: SGLANG_OTLP_EXPORTER_SCHEDULE_DELAY_MILLIS
+          value: "500"
+        - name: SGLANG_OTLP_EXPORTER_MAX_EXPORT_BATCH_SIZE
+          value: "64"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: HF_TOKEN
+              name: hf-token
+        volumeMounts:
+          - name: crash-dumps
+            mountPath: /var/sglang/crash_dumps
+        image: docker.io/lmsysorg/sglang:latest
+        imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /health
+            port: 30000
+            scheme: HTTP
+          initialDelaySeconds: 600
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 10
+        name: meta-llama-31-8b-instruct-sglang
+        ports:
+        - containerPort: 30000
+          protocol: TCP
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: hf-cache
+        - mountPath: /etc/localtime
+          name: localtime
+          readOnly: true
+      dnsPolicy: ClusterFirst
+      hostIPC: true
+      restartPolicy: Always
+      runtimeClassName: nvidia
+      schedulerName: default-scheduler
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: crash-dumps
+        emptyDir: {}
+      - hostPath:
+          path: /root/.cache/huggingface
+          type: DirectoryOrCreate
+        name: hf-cache
+      - hostPath:
+          path: /etc/localtime
+          type: File
+        name: localtime

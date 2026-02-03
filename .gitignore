@@ -280,3 +280,4 @@ sgl-kernel/third_party/
 
 # MUSA core dump files
 core_*
+docker/*.secret.yaml
