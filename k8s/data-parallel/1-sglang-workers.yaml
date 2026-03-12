@@ -1,0 +1,140 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-worker-headless
+  namespace: sglang
+spec:
+  clusterIP: None  # Headless service for direct pod addressing
+  selector:
+    app: sglang-worker
+  ports:
+  - port: 30000
+    name: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sglang-worker
+  namespace: sglang
+spec:
+  serviceName: "sglang-worker-headless"
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sglang-worker
+  template:
+    metadata:
+      labels:
+        app: sglang-worker
+        engine: sglang
+    spec:
+      terminationGracePeriodSeconds: 30
+      hostIPC: true
+      runtimeClassName: nvidia
+      
+      # ---------------------------------------------------------
+      # KEY CHANGE: Force workers to land on DIFFERENT nodes
+      # ---------------------------------------------------------
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - sglang-worker
+            topologyKey: "kubernetes.io/hostname"
+
+      containers:
+      - name: sglang-worker
+        image: docker.io/lmsysorg/sglang:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          pip install --no-cache-dir -e "python[tracing]" && \
+          python3 -m sglang.launch_server "$@"
+        - --
+        args:
+        # Note: Worker port matches the container port
+        - --model-path
+        - meta-llama/Llama-3.1-8B-Instruct
+        - --dtype
+        - bfloat16
+        - --kv-cache-dtype
+        - bf16
+        - --host
+        - 0.0.0.0
+        - --port
+        - "30000"
+        - --served-model-name
+        - meta-llama/Llama-3.1-8B-Instruct
+        # Metrics & Tracing
+        - --enable-metrics
+        - --log-requests
+        - --log-requests-level
+        - "2"
+        - --log-level
+        - info
+        - --log-requests-format
+        - json
+        - --log-requests-target
+        - stdout
+        - --enable-request-time-stats-logging
+        - --enable-trace
+        - --otlp-traces-endpoint
+        - otel-collector.observability.svc.cluster.local:4317
+        - --crash-dump-folder
+        - /var/sglang/crash_dumps
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: HF_TOKEN
+              name: hf-token
+        - name: OTEL_SERVICE_NAME
+          value: "sglang-worker" # Distinct name for traces
+        ports:
+        - containerPort: 30000
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: hf-cache
+        - mountPath: /var/sglang/crash_dumps
+          name: crash-dumps
+        - mountPath: /etc/localtime
+          name: localtime
+          readOnly: true
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 30000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60 # 180 * 10s = 1800s (30 minutes)
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 30000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 5
+      volumes:
+      - name: hf-cache
+        hostPath:
+          path: /root/.cache/huggingface
+          type: DirectoryOrCreate
+      - name: crash-dumps
+        emptyDir: {}
+      - name: localtime
+        hostPath:
+          path: /etc/localtime
+          type: File

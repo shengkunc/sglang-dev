@@ -37,8 +37,7 @@ spec:
             --balance-rel-threshold 1.2 \
             --api-key "$SGLANG_API_KEY" \
             --worker-urls \
-              http://sglang-worker-0.sglang-worker-headless.sglang.svc.cluster.local:30000 \
-              http://sglang-worker-1.sglang-worker-headless.sglang.svc.cluster.local:30000
+              http://sglang-worker-0.sglang-worker-headless.sglang.svc.cluster.local:30000
         env:
         - name: HF_TOKEN
           valueFrom:

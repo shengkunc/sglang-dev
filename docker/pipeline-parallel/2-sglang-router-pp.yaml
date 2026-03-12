@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sglang-router
+  namespace: sglang
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sglang-router
+  template:
+    metadata:
+      labels:
+        app: sglang-router
+    spec:
+      containers:
+      - name: router
+        image: docker.io/lmsysorg/sglang:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # The Router only needs to talk to the Leader (Worker 0)
+          # Worker 1 is invisible to the router.
+          python3 -m sglang.launch_router \
+            --host 0.0.0.0 \
+            --port 30000 \
+            --worker-urls http://sglang-worker-0.sglang-worker-headless.sglang.svc.cluster.local:30000
+
+        ports:
+        - containerPort: 30000
+        livenessProbe:
+          tcpSocket:
+            port: 30000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+
+---
+# This is the ONLY external access point
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-entrypoint
+  namespace: sglang
+spec:
+  type: NodePort
+  selector:
+    app: sglang-router
+  ports:
+  - protocol: TCP
+    port: 30000
+    targetPort: 30000
+    nodePort: 30000

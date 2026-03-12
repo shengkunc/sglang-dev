@@ -1,0 +1,138 @@
+# -----------------------------------------------------------------------------
+# 1. Headless Service (Internal Discovery)
+# Allows nodes to find each other at:
+# sglang-worker-0.sglang-worker-headless.sglang.svc.cluster.local
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-worker-headless
+  namespace: sglang
+spec:
+  clusterIP: None
+  selector:
+    app: sglang-worker
+  ports:
+  - port: 50000        # NCCL / Distributed Init Port
+    name: dist-port
+  - port: 30000        # HTTP Port (Only useful on Rank 0)
+    name: http
+
+---
+# -----------------------------------------------------------------------------
+# 2. StatefulSet (The Model Pipeline)
+# Rank 0 (Leader) + Rank 1 (Worker)
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sglang-worker
+  namespace: sglang
+spec:
+  serviceName: "sglang-worker-headless"
+  replicas: 2  # Must match your Pipeline Parallel size (--pp 2)
+  selector:
+    matchLabels:
+      app: sglang-worker
+  template:
+    metadata:
+      labels:
+        app: sglang-worker
+        engine: sglang
+    spec:
+      terminationGracePeriodSeconds: 30
+      hostIPC: true             # Required for CUDA Shared Memory
+      runtimeClassName: nvidia
+
+      # Force pods to different physical nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - sglang-worker
+            topologyKey: "kubernetes.io/hostname"
+
+      containers:
+      - name: sglang-worker
+        image: docker.io/lmsysorg/sglang:latest
+        imagePullPolicy: Always
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: HF_TOKEN
+              name: hf-token
+        # CRITICAL: Force NCCL to use Ethernet (standard k3s setup)
+        # If you have InfiniBand, remove these.
+        - name: NCCL_IB_DISABLE
+          value: "1"
+        - name: NCCL_P2P_DISABLE
+          value: "1"
+        # Define the Leader Address (Rank 0's stable DNS)
+        - name: LEADER_ADDR
+          value: "sglang-worker-0.sglang-worker-headless.sglang.svc.cluster.local:50000"
+
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # 0. Install missing dependencies
+          # We use --no-cache-dir to keep the container slim
+          # pip install --no-cache-dir bitsandbytes>=0.45.0
+
+          # 1. Determine Node Rank from Hostname (sglang-worker-0 -> 0)
+          echo "Determining Rank from hostname: $HOSTNAME"
+          if [[ "$HOSTNAME" =~ ([0-9]+)$ ]]; then
+              export NODE_RANK=${BASH_REMATCH[1]}
+              echo "Node Rank: $NODE_RANK"
+          else
+              echo "Error: Could not extract rank from hostname"
+              exit 1
+          fi
+
+          # 2. Start SGLang
+          # --tp 1: One GPU per node
+          # --pp 2: Split model across 2 nodes
+          # --dist-init-addr: Where Rank 1 connects to Rank 0
+          
+          echo "Connecting to Leader: $LEADER_ADDR"
+          
+          python3 -m sglang.launch_server \
+            --model-path cyankiwi/Qwen3-30B-A3B-Instruct-2507-AWQ-4bit \
+            --tp 1 \
+            --pp-size 2 \
+            --nnodes 2 \
+            --node-rank $NODE_RANK \
+            --dist-init-addr $LEADER_ADDR \
+            --host 0.0.0.0 \
+            --port 30000 \
+            --trust-remote-code \
+            --enable-metrics 
+
+        ports:
+        - containerPort: 30000 # HTTP
+        - containerPort: 50000 # Distributed Init
+        
+        volumeMounts:
+        - mountPath: /root/.cache/huggingface
+          name: hf-cache
+        - mountPath: /dev/shm
+          name: dshm
+
+      volumes:
+      - name: hf-cache
+        hostPath:
+          path: /root/.cache/huggingface
+          type: DirectoryOrCreate
+      - name: dshm
+        emptyDir:
+          medium: Memory
+
